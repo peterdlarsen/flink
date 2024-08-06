@@ -330,15 +330,12 @@ public class FlinkKafkaProducerITCase extends KafkaTestBase {
     @RetryOnFailure(times = 0)
     @Test
     public void testFailAndRecoverSameCheckpointTwiceWithScaleDown() throws Exception {
-        String topic = "flink-kafka-producer-fail-and-recover-same-checkpoint"
-                + "-twice-plus-scale-down-simple";
-        // General test case is:
-        //   1. Recover from checkpoint without checkpointing
-        //   2. Scale down and recover from same checkpoint
-        // I think the core bug is that we assume we don't need to abort if we committed a recovered
-        // transaction, but really we need to do that.
+        String topic = "flink-kafka-producer-fail-and-recover-same-checkpoint-twice-plus-scale-down";
 
-
+        // Process here is:
+        // 1. Run with parallelism 2 then stop
+        // 2. Start up from the savepoint from 1, but fail to come up
+        // 3. Start again with parallelism 1 and the savepoint from 1
 
         // Run many to get checkpoints to load from.
         // Commits records 0, 2
