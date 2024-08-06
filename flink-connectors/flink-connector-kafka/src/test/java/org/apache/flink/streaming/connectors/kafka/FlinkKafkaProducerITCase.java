@@ -343,12 +343,12 @@ public class FlinkKafkaProducerITCase extends KafkaTestBase {
         int preScaleDownParallelism = 2;
         for (int subtaskIndex = 0; subtaskIndex < preScaleDownParallelism; subtaskIndex++) {
             OneInputStreamOperatorTestHarness<Integer, Object> preScaleDownOperator =
-                    createTestHarnessWithLimitedTxns(
+                    createTestHarness(
                             topic,
                             preScaleDownParallelism,
                             preScaleDownParallelism,
                             subtaskIndex,
-                            FlinkKafkaProducer.Semantic.EXACTLY_ONCE,2);
+                            FlinkKafkaProducer.Semantic.EXACTLY_ONCE);
 
             preScaleDownOperator.setup();
             preScaleDownOperator.open();
@@ -363,12 +363,12 @@ public class FlinkKafkaProducerITCase extends KafkaTestBase {
         List<AutoCloseable> operatorsToClose = new ArrayList<>();
         for (int subtaskIndex = 0; subtaskIndex < preScaleDownParallelism; subtaskIndex++) {
             OneInputStreamOperatorTestHarness<Integer, Object> preScaleDownOperator =
-                    createTestHarnessWithLimitedTxns(
+                    createTestHarness(
                             topic,
                             preScaleDownParallelism,
                             preScaleDownParallelism,
                             subtaskIndex,
-                            FlinkKafkaProducer.Semantic.EXACTLY_ONCE, 2);
+                            FlinkKafkaProducer.Semantic.EXACTLY_ONCE);
 
             preScaleDownOperator.setup();
             // Restore from snapshots
@@ -382,7 +382,7 @@ public class FlinkKafkaProducerITCase extends KafkaTestBase {
         // Simulate restarting with lower parallelism (2 -> 1 in this case)
         OperatorSubtaskState mergedState = AbstractStreamOperatorTestHarness.repackageState(stateSnapshots.toArray(new OperatorSubtaskState[2]));
         OneInputStreamOperatorTestHarness<Integer, Object> postScaleDownOperator1 =
-                createTestHarnessWithLimitedTxns(topic, 1, 1, 0, FlinkKafkaProducer.Semantic.EXACTLY_ONCE, 2);
+                createTestHarness(topic, 1, 1, 0, FlinkKafkaProducer.Semantic.EXACTLY_ONCE);
         postScaleDownOperator1.setup();
         postScaleDownOperator1.initializeState(mergedState);
         postScaleDownOperator1.open();
@@ -883,34 +883,6 @@ public class FlinkKafkaProducerITCase extends KafkaTestBase {
         FlinkKafkaProducer<Integer> kafkaProducer =
                 new FlinkKafkaProducer<>(
                         topic, integerKeyedSerializationSchema, properties, semantic);
-
-        return new OneInputStreamOperatorTestHarness<>(
-                new StreamSink<>(kafkaProducer),
-                maxParallelism,
-                parallelism,
-                subtaskIndex,
-                IntSerializer.INSTANCE,
-                new OperatorID(42, 44));
-    }
-
-
-    private OneInputStreamOperatorTestHarness<Integer, Object> createTestHarnessWithLimitedTxns(
-            String topic,
-            int maxParallelism,
-            int parallelism,
-            int subtaskIndex,
-            FlinkKafkaProducer.Semantic semantic,
-            int transactionalIdPoolSize)
-            throws Exception {
-        Properties properties = createProperties();
-
-        FlinkKafkaProducer<Integer> kafkaProducer = new FlinkKafkaProducer<>(
-                topic,
-                integerKeyedSerializationSchema,
-                properties,
-                Optional.of(new FlinkFixedPartitioner<>()),
-                semantic,
-                transactionalIdPoolSize);
 
         return new OneInputStreamOperatorTestHarness<>(
                 new StreamSink<>(kafkaProducer),
