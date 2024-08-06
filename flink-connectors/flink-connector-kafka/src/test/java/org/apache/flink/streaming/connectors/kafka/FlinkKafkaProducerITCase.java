@@ -334,8 +334,8 @@ public class FlinkKafkaProducerITCase extends KafkaTestBase {
 
         // Process here is:
         // 1. Run with parallelism 2 then stop
-        // 2. Start up from the savepoint from 1, but fail to come up
-        // 3. Start again with parallelism 1 and the savepoint from 1
+        // 2. Start up from the checkpoints from 1, but fail to come up
+        // 3. Start again with parallelism 1 and the checkpoints from 1
 
         // Run many to get checkpoints to load from.
         // Commits records 0, 2
