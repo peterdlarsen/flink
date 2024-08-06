@@ -25,9 +25,12 @@ import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.streaming.api.operators.StreamSink;
 import org.apache.flink.streaming.connectors.kafka.internals.KeyedSerializationSchemaWrapper;
+import org.apache.flink.streaming.connectors.kafka.partitioner.FlinkFixedPartitioner;
 import org.apache.flink.streaming.util.AbstractStreamOperatorTestHarness;
 import org.apache.flink.streaming.util.OneInputStreamOperatorTestHarness;
 import org.apache.flink.streaming.util.serialization.KeyedSerializationSchema;
+
+import org.apache.flink.testutils.junit.RetryOnFailure;
 
 import org.apache.kafka.common.errors.ProducerFencedException;
 import org.junit.Before;
@@ -320,6 +323,92 @@ public class FlinkKafkaProducerITCase extends KafkaTestBase {
         // - records 42 and 43 in committed transactions
         // - aborted transactions with records 44 and 45
         assertExactlyOnceForTopic(createProperties(), topic, Arrays.asList(42, 43));
+        deleteTestTopic(topic);
+        checkProducerLeak();
+    }
+
+    @RetryOnFailure(times = 0)
+    @Test
+    public void testFailAndRecoverSameCheckpointTwiceWithScaleDown() throws Exception {
+        String topic = "flink-kafka-producer-fail-and-recover-same-checkpoint"
+                + "-twice-plus-scale-down-simple";
+        // General test case is:
+        //   1. Recover from checkpoint without checkpointing
+        //   2. Scale down and recover from same checkpoint
+        // I think the core bug is that we assume we don't need to abort if we committed a recovered
+        // transaction, but really we need to do that.
+
+
+
+        // Run many to get checkpoints to load from.
+        // Commits records 0, 2
+        List<OperatorSubtaskState> stateSnapshots = new ArrayList<>();
+        int preScaleDownParallelism = 2;
+        for (int subtaskIndex = 0; subtaskIndex < preScaleDownParallelism; subtaskIndex++) {
+            OneInputStreamOperatorTestHarness<Integer, Object> preScaleDownOperator =
+                    createTestHarnessWithLimitedTxns(
+                            topic,
+                            preScaleDownParallelism,
+                            preScaleDownParallelism,
+                            subtaskIndex,
+                            FlinkKafkaProducer.Semantic.EXACTLY_ONCE,2);
+
+            preScaleDownOperator.setup();
+            preScaleDownOperator.open();
+            preScaleDownOperator.processElement(subtaskIndex * 2, 0);
+            stateSnapshots.add(preScaleDownOperator.snapshot(0, 1));
+            preScaleDownOperator.notifyOfCompletedCheckpoint(0);
+            preScaleDownOperator.close();
+        }
+
+        // Writes open transactions with records 1, 3
+        // Leaves lingering transactions.
+        List<AutoCloseable> operatorsToClose = new ArrayList<>();
+        for (int subtaskIndex = 0; subtaskIndex < preScaleDownParallelism; subtaskIndex++) {
+            OneInputStreamOperatorTestHarness<Integer, Object> preScaleDownOperator =
+                    createTestHarnessWithLimitedTxns(
+                            topic,
+                            preScaleDownParallelism,
+                            preScaleDownParallelism,
+                            subtaskIndex,
+                            FlinkKafkaProducer.Semantic.EXACTLY_ONCE, 2);
+
+            preScaleDownOperator.setup();
+            // Restore from snapshots
+            preScaleDownOperator.initializeState(stateSnapshots.get(subtaskIndex));
+            preScaleDownOperator.open();
+            preScaleDownOperator.processElement(subtaskIndex * 2 + 1, 2);
+            operatorsToClose.add(preScaleDownOperator);
+        }
+
+
+        // Simulate restarting with lower parallelism (2 -> 1 in this case)
+        OperatorSubtaskState mergedState = AbstractStreamOperatorTestHarness.repackageState(stateSnapshots.toArray(new OperatorSubtaskState[2]));
+        OneInputStreamOperatorTestHarness<Integer, Object> postScaleDownOperator1 =
+                createTestHarnessWithLimitedTxns(topic, 1, 1, 0, FlinkKafkaProducer.Semantic.EXACTLY_ONCE, 2);
+        postScaleDownOperator1.setup();
+        postScaleDownOperator1.initializeState(mergedState);
+        postScaleDownOperator1.open();
+
+        postScaleDownOperator1.processElement(42, 3);
+        postScaleDownOperator1.snapshot(1, 8);
+        postScaleDownOperator1.notifyOfCompletedCheckpoint(1);
+        postScaleDownOperator1.close();
+
+        // now we should have:
+        // - [0 (committed), 2 (committed), 1 (aborted), 3 (aborted), 42 (committed)]
+        //
+        // what I think we actually have is:
+        // - [0 (committed), 2 (committed), 1 (open), 3 (aborted by 42), 42 (committed)]
+        //
+        // Fails with "Expected elements: <[0, 2, 42]>, but was: elements: <[0, 2]>"
+        assertExactlyOnceForTopic(createProperties(), topic, Arrays.asList(0, 2, 42));
+
+        // ignore ProducerFencedExceptions, because postScaleDownOperator1 could reuse transactional
+        // ids.
+        for (AutoCloseable operatorToClose : operatorsToClose) {
+            closeIgnoringProducerFenced(operatorToClose);
+        }
         deleteTestTopic(topic);
         checkProducerLeak();
     }
@@ -797,6 +886,34 @@ public class FlinkKafkaProducerITCase extends KafkaTestBase {
         FlinkKafkaProducer<Integer> kafkaProducer =
                 new FlinkKafkaProducer<>(
                         topic, integerKeyedSerializationSchema, properties, semantic);
+
+        return new OneInputStreamOperatorTestHarness<>(
+                new StreamSink<>(kafkaProducer),
+                maxParallelism,
+                parallelism,
+                subtaskIndex,
+                IntSerializer.INSTANCE,
+                new OperatorID(42, 44));
+    }
+
+
+    private OneInputStreamOperatorTestHarness<Integer, Object> createTestHarnessWithLimitedTxns(
+            String topic,
+            int maxParallelism,
+            int parallelism,
+            int subtaskIndex,
+            FlinkKafkaProducer.Semantic semantic,
+            int transactionalIdPoolSize)
+            throws Exception {
+        Properties properties = createProperties();
+
+        FlinkKafkaProducer<Integer> kafkaProducer = new FlinkKafkaProducer<>(
+                topic,
+                integerKeyedSerializationSchema,
+                properties,
+                Optional.of(new FlinkFixedPartitioner<>()),
+                semantic,
+                transactionalIdPoolSize);
 
         return new OneInputStreamOperatorTestHarness<>(
                 new StreamSink<>(kafkaProducer),
